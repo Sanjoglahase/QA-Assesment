@@ -1,0 +1,249 @@
+{
+  "name": "Morning Brief — GitHub Trending + CoinGecko Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule Trigger (every 1 hr)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/search/repositories",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "topic:ai language:python" },
+            { "name": "sort", "value": "stars" },
+            { "name": "order", "value": "desc" },
+            { "name": "per_page", "value": "10" }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "id": "node-github-search",
+      "name": "GitHub — Search AI Repos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 300],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep top 5 repos, reshape to a clean object\nconst items = $input.all();\nconst repos = items[0].json.items || [];\n\nconst top5 = repos.slice(0, 5).map(r => ({\n  name: r.full_name,\n  description: r.description ? r.description.substring(0, 120) : 'No description',\n  stars: r.stargazers_count,\n  url: r.html_url,\n  language: r.language || 'Unknown',\n  updated: r.updated_at ? r.updated_at.substring(0, 10) : 'N/A'\n}));\n\nreturn top5.map(repo => ({ json: repo }));"
+      },
+      "id": "node-transform",
+      "name": "Code — Filter & Reshape Top 5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [620, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "cond-stars",
+              "leftValue": "={{ $json.stars }}",
+              "rightValue": 1000,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-if",
+      "name": "IF — Stars >= 1000",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [840, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "vs_currency", "value": "usd" },
+            { "name": "days", "value": "1" },
+            { "name": "interval", "value": "hourly" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-coingecko",
+      "name": "CoinGecko — BTC 24h Chart",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1060, 200],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build enriched message line for high-star repos\nconst repoData = $('IF — Stars >= 1000').item.json;\n\n// Get BTC price from CoinGecko response (latest price point)\nlet btcPrice = 'N/A';\ntry {\n  const prices = $input.first().json.prices;\n  if (prices && prices.length > 0) {\n    const latest = prices[prices.length - 1];\n    btcPrice = '$' + Number(latest[1]).toLocaleString('en-US', { maximumFractionDigits: 0 });\n  }\n} catch(e) { btcPrice = 'N/A'; }\n\nreturn [{\n  json: {\n    ...repoData,\n    btcPrice,\n    tier: 'HOT',\n    line: `🔥 [${repoData.name}](${repoData.url}) — ⭐ ${repoData.stars.toLocaleString()} | ${repoData.language} | ${repoData.description} | BTC: ${btcPrice}`\n  }\n}];"
+      },
+      "id": "node-enrich-hot",
+      "name": "Code — Enrich Hot Repo with BTC Price",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1280, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build simple message line for lower-star repos\nconst repo = $input.first().json;\nreturn [{\n  json: {\n    ...repo,\n    tier: 'RISING',\n    line: `📈 [${repo.name}](${repo.url}) — ⭐ ${repo.stars.toLocaleString()} | ${repo.language} | ${repo.description}`\n  }\n}];"
+      },
+      "id": "node-enrich-rising",
+      "name": "Code — Label Rising Repo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1060, 420]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "node-merge",
+      "name": "Merge — Combine All Lines",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble the final Discord digest message\nconst allItems = $input.all();\nconst lines = allItems.map(i => i.json.line).filter(Boolean).join('\\n');\nconst now = new Date().toUTCString();\n\nconst message = {\n  content: null,\n  embeds: [{\n    title: '🤖 Morning Brief — Top AI Repos on GitHub',\n    description: lines || 'No repos found this run.',\n    color: 3447003,\n    footer: { text: `Generated at ${now}` }\n  }]\n};\n\nreturn [{ json: { payload: JSON.stringify(message) } }];"
+      },
+      "id": "node-build-digest",
+      "name": "Code — Build Discord Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1720, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "content", "value": "={{ JSON.parse($json.payload).embeds[0].description }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-discord",
+      "name": "Discord — Post Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1940, 300],
+      "credentials": {
+        "discordWebhookCredential": {
+          "id": "cred-discord",
+          "name": "Discord Webhook"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log the failed node and its error to console (and optionally a fallback channel)\nconst errorData = $input.all();\nfor (const item of errorData) {\n  console.error('[ERROR] Node failed:', JSON.stringify({\n    node: item.json.node || 'unknown',\n    error: item.json.error || item.json,\n    timestamp: new Date().toISOString()\n  }));\n}\nreturn errorData;"
+      },
+      "id": "node-error-handler",
+      "name": "Code — Log Error (Fallback)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1060, 580]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (every 1 hr)": {
+      "main": [
+        [{ "node": "GitHub — Search AI Repos", "type": "main", "index": 0 }]
+      ]
+    },
+    "GitHub — Search AI Repos": {
+      "main": [
+        [{ "node": "Code — Filter & Reshape Top 5", "type": "main", "index": 0 }]
+      ],
+      "error": [
+        [{ "node": "Code — Log Error (Fallback)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code — Filter & Reshape Top 5": {
+      "main": [
+        [{ "node": "IF — Stars >= 1000", "type": "main", "index": 0 }]
+      ]
+    },
+    "IF — Stars >= 1000": {
+      "main": [
+        [{ "node": "CoinGecko — BTC 24h Chart", "type": "main", "index": 0 }],
+        [{ "node": "Code — Label Rising Repo", "type": "main", "index": 0 }]
+      ]
+    },
+    "CoinGecko — BTC 24h Chart": {
+      "main": [
+        [{ "node": "Code — Enrich Hot Repo with BTC Price", "type": "main", "index": 0 }]
+      ],
+      "error": [
+        [{ "node": "Code — Log Error (Fallback)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code — Enrich Hot Repo with BTC Price": {
+      "main": [
+        [{ "node": "Merge — Combine All Lines", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code — Label Rising Repo": {
+      "main": [
+        [{ "node": "Merge — Combine All Lines", "type": "main", "index": 1 }]
+      ]
+    },
+    "Merge — Combine All Lines": {
+      "main": [
+        [{ "node": "Code — Build Discord Digest", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code — Build Discord Digest": {
+      "main": [
+        [{ "node": "Discord — Post Digest", "type": "main", "index": 0 }]
+      ]
+    },
+    "Discord — Post Digest": {
+      "main": [],
+      "error": [
+        [{ "node": "Code — Log Error (Fallback)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-05-25T00:00:00.000Z",
+  "versionId": "1"
+}
